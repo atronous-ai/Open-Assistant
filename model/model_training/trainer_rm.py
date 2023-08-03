@@ -1,7 +1,7 @@
 import argparse
 import logging
 import os
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Literal, Optional, Sequence, Union
 
 import datasets
 import torch
@@ -128,7 +128,7 @@ class RMTrainer(Trainer):
         return dataloader
 
 
-def argument_parsing(notebook=False, notebook_args=None):
+def argument_parsing(notebook: bool = False, notebook_args: Sequence[str] | None = None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+", required=True)
     parser.add_argument("--local_rank", type=int, default=-1)
@@ -196,12 +196,18 @@ def main():
         max_length=training_conf.max_length,
         pad_to_multiple_of=16,
         max_replies=training_conf.max_replies,
+        use_system_tag=training_conf.use_system_tag,
+        system_property_dropout=training_conf.system_property_dropout,
+        system_add_length=training_conf.system_add_length,
     )
     eval_collate_fn = RankingDataCollator(
         tokenizer,
         max_length=training_conf.max_length,
         pad_to_multiple_of=16,
         max_replies=training_conf.max_replies,
+        use_system_tag=training_conf.use_system_tag,
+        system_property_dropout=training_conf.system_property_dropout,
+        system_add_length=training_conf.system_add_length,
     )
 
     show_dataset_stats = (training_conf.verbose or training_conf.show_dataset_stats) and (

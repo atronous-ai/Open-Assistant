@@ -9,18 +9,17 @@ from typing import List, NamedTuple
 import evaluate
 import torch
 import transformers
-import tritonclient.grpc as client_util
 import yaml
 from model_training.custom_datasets import get_one_dataset
 from model_training.custom_datasets.formatting import QA_SPECIAL_TOKENS
 from model_training.models import freeze_top_n_layers, get_specific_model
 from model_training.models.patching import patch_model
+from model_training.models.prefix_llama import LlamaForCausalLM
 from model_training.models.reward_model import GPTNeoXRewardModel
 from sklearn.model_selection import train_test_split
 from tokenizers import pre_tokenizers
 from torch.utils.data import ConcatDataset, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
-from tritonclient.utils import np_to_triton_dtype
 
 from .losses import CrossEntropyLoss, PolyLoss, RMCLSLoss, RMLoss
 
@@ -34,12 +33,6 @@ def init_rng(conf: argparse.Namespace) -> None:
     if seed is not None:
         print(f"RNG seed: {seed}")
         transformers.set_seed(seed)
-
-
-def prepare_tensor(name: str, input):
-    t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
-    t.set_data_from_numpy(input)
-    return t
 
 
 class PerDatasetSampler(DistributedSampler):
@@ -88,6 +81,7 @@ class PerDatasetSampler(DistributedSampler):
         self.shuffle = shuffle
         self.rank = rank
         self.world_size = world_size
+        self.epoch = 0
 
         if world_size == 1:
             self.rank = 0
@@ -96,7 +90,7 @@ class PerDatasetSampler(DistributedSampler):
         self.seed = seed
         self.samples_length = samples_length
 
-    def set_epoch(self, epoch) -> None:
+    def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
     def __len__(self) -> int:
@@ -133,11 +127,12 @@ class PerDatasetSampler(DistributedSampler):
         return iter(epoch_idx)
 
     @classmethod
-    def build_sampler_from_config(cls, training_conf, datasets: List[Dataset], verbose: bool = False, *args, **kwargs):
+    def build_sampler_from_config(cls, training_conf, datasets: List[Dataset], verbose: bool = False, **kwargs):
         dataset_sizes = [len(x) for x in datasets]
         fractions = get_dataset_fractions(training_conf.datasets, dataset_sizes, verbose)
         dataset_size_per_epoch = [int(size * frac) for size, frac in zip(dataset_sizes, fractions)]
-        return cls(dataset_sizes, dataset_size_per_epoch, *args, **kwargs)
+        seed = training_conf.rng_seed
+        return cls(dataset_sizes=dataset_sizes, dataset_size_per_epoch=dataset_size_per_epoch, seed=seed, **kwargs)
 
 
 def get_dataset_fractions(conf, dataset_sizes: List[int], verbose: bool = False):
@@ -189,6 +184,10 @@ TOKENIZER_CONFIGS = {
     "deberta-v3": TokenizerConfig(special_tokens=SpecialTokens("[PAD]", "[SEP]", sep_token="[CLS]")),
     "bloom": TokenizerConfig(special_tokens=SpecialTokens("<pad>", "</s>", "<s>")),
     "electra": TokenizerConfig(special_tokens=SpecialTokens("[PAD]", "[SEP]", sep_token="[CLS]")),
+    "falcon": TokenizerConfig(
+        special_tokens=SpecialTokens("<|endoftext|>", "<|endoftext|>", sep_token="<|endoftext|>")
+    ),
+    "LLongMA": TokenizerConfig(special_tokens=SpecialTokens("</s>", "</s>", sep_token="<s>")),
 }
 
 
@@ -317,15 +316,18 @@ def get_model(conf, tokenizer, pad_vocab_size_to_multiple_of=16, check_freeze_la
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
                 conf.model_name, cache_dir=conf.cache_dir, num_labels=1, torch_dtype=dtype
             )
-    else:
-        model = get_specific_model(
-            conf.model_name,
-            cache_dir=conf.cache_dir,
-            quantization=conf.quantization,
-            seq2seqmodel=conf.seq2seqmodel,
-            without_head=conf.is_reward_model,
-            torch_dtype=dtype,
-        )
+    if not conf.is_reward_model:
+        if conf.peft_type is not None and conf.peft_type == "prefix-tuning" and "llama" in conf.model_name:
+            model = LlamaForCausalLM.from_pretrained(conf.model_name, cache_dir=conf.cache_dir, torch_dtype=dtype)
+        else:
+            model = get_specific_model(
+                conf.model_name,
+                cache_dir=conf.cache_dir,
+                quantization=conf.quantization,
+                seq2seqmodel=conf.seq2seqmodel,
+                without_head=conf.is_reward_model,
+                torch_dtype=dtype,
+            )
 
         n_embs = model.get_input_embeddings().num_embeddings
         if len(tokenizer) != n_embs and check_freeze_layer:
@@ -344,7 +346,12 @@ def get_model(conf, tokenizer, pad_vocab_size_to_multiple_of=16, check_freeze_la
     params = sum([p.numel() for p in model_parameters])
     print("Number of trainable parameters: {}M".format(int(params / 1e6)))
 
-    patch_model(model, resid_pdrop=conf.residual_dropout, flash_attention=conf.use_flash_attention)
+    patch_model(
+        model,
+        resid_pdrop=conf.residual_dropout,
+        flash_attention=conf.use_flash_attention,
+        residual_dropout_lima=conf.residual_dropout_lima,
+    )
 
     return model
 
@@ -428,3 +435,24 @@ def process_output(output: str, method: str = "v2", bot_name: str = "Joi") -> st
         answer = output.split("\n\n{}:".format(bot_name))[-1]
         answer = answer.split("</s>")[0].replace("<|endoftext|>", "").lstrip().split("\n\n{}:".format(bot_name))[0]
     return answer
+
+
+def merge_dicts(default: dict, config: dict):
+    """
+    merge default dict with config dict to override params
+    """
+    for k, v in default.items():
+        if k not in config.keys():
+            config.update({k: v})
+
+    return config
+
+
+def get_all_linear_layers(model):
+    cls = torch.nn.Linear
+
+    modules = {name.split(".")[-1] for name, module in model.named_modules() if isinstance(module, cls)}
+    if "lm_head" in modules:
+        modules.remove("lm_head")
+
+    return list(modules)

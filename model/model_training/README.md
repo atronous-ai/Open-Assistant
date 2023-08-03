@@ -57,11 +57,16 @@ Currently only these languages are supported via prompt translation:
 ar,de,fr,en,it,nl,tr,ru,ms,ko,ja,zh
 ```
 
+We provide many more datasets for training a list of these can be found in
+[here](https://github.com/LAION-AI/Open-Assistant/blob/main/model/model_training/custom_datasets/__init__.py)
+
 ## Dataset sub-sampling
 
 We can subsample the **training** data by passing either the `fraction` or
-`size` argument in the `configs/config.yml` file. Don't forget the additional
-colon ":" after the dataset name when doing this.
+`size` argument in the `configs/config.yml` (for RM training
+`configs/config_rm.yml` and for RL training `configs/config_rl.yml`
+respectively) file. Don't forget the additional colon ":" after the dataset name
+when doing this.
 
 Example:
 
@@ -212,10 +217,9 @@ deepspeed trainer_sft.py --configs defaults your-model-name --deepspeed
 Here is an uncomplete overview of datasets for sft:
 
 <!-- prettier-ignore -->
+<!-- prettier-ignore-start -->
 dataset_name                    | train_counts | eval_counts | total_counts
-----------------------------------------------------------------
-
-<!-- prettier-ignore -->
+--|--|--|--
 joke                            |       301    |      76     |       377
 webgpt                          |     14251    |    3563     |     17814
 gpt4all                         |    313552    |   78388     |    391940
@@ -233,6 +237,7 @@ prosocial_dialogue              |    157160    |   26983     |    184143
 explain_prosocial               |    360708    |   61248     |    421956
 soda                            |    924102    |  231026     |   1155128
 oa_leet10k                      |     18728    |    4683     |     23411
+<!-- prettier-ignore-end -->
 
 This list can be generated with the following command, but beware that this
 downloads all available datasets (>100GB):

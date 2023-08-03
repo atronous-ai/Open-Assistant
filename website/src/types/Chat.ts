@@ -21,10 +21,12 @@ export interface ChatItem {
   created_at: string; //timestamp
   modified_at: string; //timestamp
   messages: InferenceMessage[];
+  allow_data_use: boolean;
 
   // those are not available when you first create a chat
   title?: string;
   hidden?: boolean;
+  active_thread_tail_message_id?: string;
 }
 
 export interface InferenceMessage {
@@ -41,6 +43,8 @@ export interface InferenceMessage {
     do_sample: boolean;
     seed: number;
     sampling_parameters: SamplingParameters;
+    user_profile: string;
+    user_response_instructions: string;
     model_config: {
       model_id: string;
       max_input_length: number;
@@ -80,7 +84,20 @@ interface InferenceEventPending {
   queue_size: number;
 }
 
-export type InferenceEvent = InferenceEventMessage | InferenceEventError | InferenceEventToken | InferenceEventPending;
+interface InferenceEventPluginIntermediateStep {
+  event_type: "plugin_intermediate";
+  current_plugin_thought: string;
+  current_plugin_action_taken: string;
+  current_plugin_action_response: string;
+  current_plugin_action_input: string;
+}
+
+export type InferenceEvent =
+  | InferenceEventMessage
+  | InferenceEventError
+  | InferenceEventToken
+  | InferenceEventPending
+  | InferenceEventPluginIntermediateStep;
 
 export type ModelInfo = {
   name: string;
@@ -92,6 +109,11 @@ export type ModelParameterConfig = {
   name: string;
   description: string;
   sampling_parameters: SamplingParameters;
+};
+
+export type CustomInstructionsType = {
+  user_profile: string;
+  user_response_instructions: string;
 };
 
 export interface SamplingParameters {
@@ -106,6 +128,7 @@ export interface SamplingParameters {
 export interface ChatConfigFormData extends SamplingParameters {
   model_config_name: string; // this is the same as ModelParameterConfig.name
   plugins: PluginEntry[];
+  custom_instructions: CustomInstructionsType;
 }
 
 export interface InferencePostPrompterMessageParams {
@@ -119,6 +142,8 @@ export interface InferencePostAssistantMessageParams {
   parent_id: string;
   model_config_name: string;
   sampling_parameters: SamplingParameters;
+  user_profile: string;
+  user_response_instructions: string;
   plugins: PluginEntry[];
 }
 
@@ -126,6 +151,7 @@ export interface InferenceUpdateChatParams {
   chat_id: string;
   title?: string;
   hidden?: boolean;
+  active_thread_tail_message_id?: string;
 }
 
 export interface PluginEntry {
